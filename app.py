@@ -11,7 +11,7 @@ from datetime import date, datetime
 st.set_page_config(page_title="商品生命週期與銷售儀表板", page_icon="📊", layout="wide")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PRODUCTDEPT_SHEET_ID = "1dL7OxhYKpqaVnYn-IsOlqpQq-bREwWoo"
+PRODUCTDEPT_SHEET_ID = "1hEt4uxBABBicxIMJuR57lMiigQYF02CQHZfB-Nc6vjo"  # Total Certificate Management
 
 # ─────────────────────────────────────────────
 # 資料載入
@@ -34,17 +34,19 @@ def load_productdept_rows():
         values = ws.get_all_values()
 
         rows = []
-        # 實際欄位：A=實驗室、B=類別、C=室外機型號、D=測試搭配(室內機)、E=證書編號、F=有效期限
+        # 實際欄位（Total Certificate Management，商品驗證登錄部分）：
+        # A=實驗室、B=類別、C=室外機型號、D=測試搭配(室內機)、E=(其他欄位，暫不使用)、
+        # F=證書編號、G=有效期限
         # 畫面上的「Table_1」是 Google Sheets 表格功能的名稱標籤，不是資料列，
         # 所以第1列就是欄位標題，資料從第2列開始。
         # 用 padding 而不是「欄位數不足就整列跳過」，避免 Google Sheets API 回傳的
         # 某一列剛好比較短（尾端空白儲存格被省略）時，整筆資料被誤刪掉。
         for row in values[1:]:
-            row = list(row) + [""] * (6 - len(row)) if len(row) < 6 else row
+            row = list(row) + [""] * (7 - len(row)) if len(row) < 7 else row
             model = row[2].strip()
             if not model:
                 continue
-            category, cert_no, expire_str = row[1].strip(), row[4].strip(), row[5].strip()
+            category, cert_no, expire_str = row[1].strip(), row[5].strip(), row[6].strip()
             if not expire_str:
                 continue
             try:
