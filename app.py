@@ -197,9 +197,13 @@ expiry_view = cert_df[(cert_df["剩餘天數"] >= 0) & (cert_df["剩餘天數"] 
 expiry_view = expiry_view.sort_values("剩餘天數")
 st.caption(f"目前顯示：{threshold_label}內到期（約 {threshold_days} 天），共 {len(expiry_view)} 筆")
 
+# 用「室外機型號＋證書編號」當作每一列的唯一識別，避免同型號有多筆證書紀錄時
+# 互相覆蓋勾選狀態、或看起來像資料被去重掉了
+expiry_view["_row_key"] = expiry_view["室外機型號"].astype(str) + "｜" + expiry_view["證書編號"].astype(str)
+
 decisions = st.session_state["renewal_decisions"]
-expiry_view["要展延"] = expiry_view["室外機型號"].map(lambda m: decisions.get(m, {}).get("要展延", False))
-expiry_view["不展延"] = expiry_view["室外機型號"].map(lambda m: decisions.get(m, {}).get("不展延", False))
+expiry_view["要展延"] = expiry_view["_row_key"].map(lambda k: decisions.get(k, {}).get("要展延", False))
+expiry_view["不展延"] = expiry_view["_row_key"].map(lambda k: decisions.get(k, {}).get("不展延", False))
 
 edited_expiry = st.data_editor(
     expiry_view[["室外機型號", "類別", "證書編號", "有效期限", "剩餘天數", "要展延", "不展延"]],
@@ -213,8 +217,10 @@ edited_expiry = st.data_editor(
     key="expiry_editor",
 )
 
+# 存回決策狀態時，一樣用「室外機型號＋證書編號」當 key
+edited_expiry["_row_key"] = edited_expiry["室外機型號"].astype(str) + "｜" + edited_expiry["證書編號"].astype(str)
 for _, row in edited_expiry.iterrows():
-    st.session_state["renewal_decisions"][row["室外機型號"]] = {
+    st.session_state["renewal_decisions"][row["_row_key"]] = {
         "要展延": bool(row["要展延"]),
         "不展延": bool(row["不展延"]),
     }
