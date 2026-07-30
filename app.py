@@ -273,16 +273,63 @@ if send_clicked:
 
 st.divider()
 
+MAILSCHEDULE_TAB_NAME = "MailSchedule"
+
+def _get_gspread_client(readonly=True):
+    import gspread
+    from google.oauth2.service_account import Credentials
+    sa_info = dict(st.secrets["gcp_service_account"])
+    scope = "spreadsheets.readonly" if readonly else "spreadsheets"
+    creds = Credentials.from_service_account_info(
+        sa_info, scopes=[f"https://www.googleapis.com/auth/{scope}"]
+    )
+    return gspread.authorize(creds)
+
+def load_schedule_rows():
+    """從 Total Certificate Management 底下的 MailSchedule 分頁讀取排程設定，
+    分頁不存在的話就回傳預設值（1/10、7/10、1年3個月）。"""
+    try:
+        gc = _get_gspread_client(readonly=True)
+        sh = gc.open_by_key(PRODUCTDEPT_SHEET_ID)
+        ws = sh.worksheet(MAILSCHEDULE_TAB_NAME)
+        values = ws.get_all_values()
+        rows = []
+        for row in values[1:]:
+            if len(row) < 5 or not row[0].strip():
+                continue
+            rows.append({
+                "月": int(row[0]), "日": int(row[1]),
+                "年門檻": int(row[2]), "月門檻": int(row[3]),
+                "收件信箱": row[4].strip(),
+            })
+        return rows if rows else None
+    except Exception:
+        return None
+
+def save_schedule_rows(rows):
+    """把排程設定寫進 MailSchedule 分頁；分頁不存在就自動建立一個。"""
+    gc = _get_gspread_client(readonly=False)
+    sh = gc.open_by_key(PRODUCTDEPT_SHEET_ID)
+    try:
+        ws = sh.worksheet(MAILSCHEDULE_TAB_NAME)
+    except Exception:
+        ws = sh.add_worksheet(title=MAILSCHEDULE_TAB_NAME, rows=20, cols=5)
+    ws.clear()
+    header = ["月", "日", "年門檻", "月門檻", "收件信箱"]
+    data = [header] + [[r["月"], r["日"], r["年門檻"], r["月門檻"], r["收件信箱"]] for r in rows]
+    ws.update(data)
+
 # ─────────────────────────────────────────────
 # 定時寄信設定（兩列，日期／到期範圍都可調整；
 # 這裡只是「設定」介面，實際自動觸發需要另外做 Lambda + EventBridge 排程）
 # ─────────────────────────────────────────────
 st.markdown("**⏰ 定時寄信設定**")
-st.caption("這裡只負責設定「什麼時候寄、寄多久內到期的清單」，實際「自動在那天寄出」需要另外做一個 "
-           "Lambda 排程（跟你們原本 cert-expiry-notifier 同一種做法），設定確認後我再協助串接。")
+st.caption("這裡設定的內容會寫進 Total Certificate Management 底下的 MailSchedule 分頁，"
+           "之後排程用的 Lambda 會讀取同一份設定，兩邊不會對不上。")
 
 if "schedule_rows" not in st.session_state:
-    st.session_state["schedule_rows"] = [
+    loaded = load_schedule_rows()
+    st.session_state["schedule_rows"] = loaded or [
         {"月": 1, "日": 10, "年門檻": 1, "月門檻": 3, "收件信箱": ""},
         {"月": 7, "日": 10, "年門檻": 1, "月門檻": 3, "收件信箱": ""},
     ]
@@ -295,7 +342,7 @@ edited_schedule = st.data_editor(
     num_rows="fixed",
     column_config={
         "月": st.column_config.SelectboxColumn("觸發月", options=list(range(1, 13)), required=True),
-        "日": st.column_config.SelectboxColumn("觸發日", options=list(range(1, 29)), required=True),
+        "日": st.column_config.SelectboxColumn("觸發日", options=list(range(1, 32)), required=True),
         "年門檻": st.column_config.SelectboxColumn("到期範圍－年", options=list(range(0, 6)), required=True),
         "月門檻": st.column_config.SelectboxColumn("到期範圍－月", options=list(range(0, 12)), required=True),
         "收件信箱": st.column_config.TextColumn("收件信箱（逗號分隔）"),
@@ -305,5 +352,8 @@ edited_schedule = st.data_editor(
 st.session_state["schedule_rows"] = edited_schedule.to_dict("records")
 
 if st.button("💾 儲存排程設定"):
-    st.success("排程設定已暫存（目前僅存在這次瀏覽的畫面狀態；確定內容沒問題後，"
-               "我會協助把這份設定寫進 Lambda，讓它每年準時自動執行）。")
+    try:
+        save_schedule_rows(st.session_state["schedule_rows"])
+        st.success("排程設定已寫入 Google Sheets 的 MailSchedule 分頁。")
+    except Exception as e:
+        st.error(f"儲存失敗：{e}")
