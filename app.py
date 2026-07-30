@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import re
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -10,19 +11,68 @@ from datetime import date, datetime
 st.set_page_config(page_title="商品生命週期與銷售儀表板", page_icon="📊", layout="wide")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+PRODUCTDEPT_SHEET_ID = "1dL7OxhYKpqaVnYn-IsOlqpQq-bREwWoo"
 
 # ─────────────────────────────────────────────
-# 資料載入（原型階段先讀本地 JSON，之後可以換成讀 Google Sheets）
+# 資料載入
 # ─────────────────────────────────────────────
-@st.cache_data
-def load_data():
-    with open(os.path.join(HERE, "cert_data.json"), encoding="utf-8") as f:
-        cert_by_outdoor = json.load(f)
+@st.cache_data(ttl=300, show_spinner=False)
+def load_productdept_rows():
+    """從 ProductDept 這份 Google Sheets 即時讀取到期清單，不做任何去重
+    （同一個型號如果有多筆證書紀錄，全部都保留顯示）。
+    如果還沒設定 Google 服務帳號，就退回讀本地備用的 JSON，不會讓頁面直接壞掉。"""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        sa_info = dict(st.secrets["gcp_service_account"])
+        scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(PRODUCTDEPT_SHEET_ID)
+        ws = sh.get_worksheet(0)
+        values = ws.get_all_values()
+
+        rows = []
+        # 實際欄位：A=實驗室、B=類別、C=室外機型號、D=測試搭配(室內機)、E=證書編號、F=有效期限
+        # 畫面上的「Table_1」是 Google Sheets 表格功能的名稱標籤，不是資料列，
+        # 所以第1列就是欄位標題，資料從第2列開始。
+        for row in values[1:]:
+            if len(row) < 6 or not row[2].strip():
+                continue
+            category, model, cert_no, expire_str = row[1].strip(), row[2].strip(), row[4].strip(), row[5].strip()
+            if not expire_str:
+                continue
+            try:
+                expire_date = datetime.strptime(expire_str, "%Y/%m/%d").date()
+            except ValueError:
+                try:
+                    expire_date = datetime.strptime(expire_str, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+            rows.append({
+                "室外機型號": model, "類別": category,
+                "證書編號": cert_no, "有效期限": expire_date.isoformat(),
+            })
+        return rows, True
+    except Exception as e:
+        st.session_state["_productdept_error"] = str(e)
+        # 讀不到就退回本地備用資料（一樣不去重）
+        with open(os.path.join(HERE, "cert_data.json"), encoding="utf-8") as f:
+            fallback = json.load(f)
+        rows = [
+            {"室外機型號": m, "類別": c.get("類別"), "證書編號": c.get("證書編號"), "有效期限": c.get("有效期限")}
+            for m, c in fallback.items() if c.get("有效期限")
+        ]
+        return rows, False
+
+@st.cache_data(show_spinner=False)
+def load_sales_data():
     with open(os.path.join(HERE, "sales_data.json"), encoding="utf-8") as f:
-        sales_records = json.load(f)
-    return cert_by_outdoor, sales_records
+        return json.load(f)
 
-cert_by_outdoor, sales_records = load_data()
+productdept_rows, productdept_live = load_productdept_rows()
+sales_records = load_sales_data()
 
 sales_df = pd.DataFrame(sales_records)
 sales_df["銷售量"] = pd.to_numeric(sales_df["銷售量"], errors="coerce").fillna(0)
@@ -31,15 +81,15 @@ today = date.today()
 
 def build_cert_rows():
     rows = []
-    for model, cert in cert_by_outdoor.items():
-        if not cert.get("有效期限"):
+    for r in productdept_rows:
+        if not r.get("有效期限"):
             continue
-        expire_date = datetime.strptime(cert["有效期限"], "%Y-%m-%d").date()
+        expire_date = datetime.strptime(r["有效期限"], "%Y-%m-%d").date()
         days_left = (expire_date - today).days
         rows.append({
-            "室外機型號": model,
-            "類別": cert.get("類別"),
-            "證書編號": cert.get("證書編號"),
+            "室外機型號": r["室外機型號"],
+            "類別": r.get("類別"),
+            "證書編號": r.get("證書編號"),
             "有效期限": expire_date,
             "剩餘天數": days_left,
         })
@@ -47,37 +97,57 @@ def build_cert_rows():
 
 cert_df = build_cert_rows()
 
-def build_email_body(edited_df, threshold_label):
-    to_renew = edited_df[edited_df["要展延"]]
-    not_renew = edited_df[edited_df["不展延"]]
-    undecided = edited_df[~edited_df["要展延"] & ~edited_df["不展延"]]
+def build_email_html(edited_df, threshold_label):
+    def status_of(row):
+        if row["要展延"]:
+            return "✅ 要展延"
+        if row["不展延"]:
+            return "❌ 不展延"
+        return "⚠️ 尚未決定"
 
-    lines = [f"【證書展延決策通知】{today.strftime('%Y/%m/%d')}", ""]
-    lines.append(f"門檻：{threshold_label}內到期　總筆數：{len(edited_df)}")
-    lines.append("")
-    lines.append(f"✅ 要展延（{len(to_renew)} 筆）：")
-    for _, r in to_renew.iterrows():
-        lines.append(f"  {r['室外機型號']}（{r['類別']}）　到期：{r['有效期限']}　剩餘 {r['剩餘天數']} 天")
-    lines.append("")
-    lines.append(f"❌ 不展延（{len(not_renew)} 筆）：")
-    for _, r in not_renew.iterrows():
-        lines.append(f"  {r['室外機型號']}（{r['類別']}）　到期：{r['有效期限']}")
-    lines.append("")
-    lines.append(f"⚠️ 尚未決定（{len(undecided)} 筆）：")
-    for _, r in undecided.iterrows():
-        lines.append(f"  {r['室外機型號']}（{r['類別']}）　到期：{r['有效期限']}")
-    lines.append("")
-    lines.append("此為系統自動發送，請勿回覆。")
-    return "\n".join(lines)
+    rows_html = ""
+    for _, r in edited_df.iterrows():
+        status = status_of(r)
+        rows_html += f"""
+        <tr>
+          <td style="padding:6px 10px;border:1px solid #ddd">{r['室外機型號']}</td>
+          <td style="padding:6px 10px;border:1px solid #ddd">{r['類別'] or ''}</td>
+          <td style="padding:6px 10px;border:1px solid #ddd">{r['證書編號'] or ''}</td>
+          <td style="padding:6px 10px;border:1px solid #ddd">{r['有效期限']}</td>
+          <td style="padding:6px 10px;border:1px solid #ddd;text-align:center">{r['剩餘天數']}</td>
+          <td style="padding:6px 10px;border:1px solid #ddd">{status}</td>
+        </tr>"""
 
-def send_mail(recipients, subject, body):
+    html = f"""
+    <html><body style="font-family:'Microsoft JhengHei',Arial,sans-serif;color:#222">
+      <h3>【證書展延決策通知】{today.strftime('%Y/%m/%d')}</h3>
+      <p>門檻：{threshold_label}內到期　總筆數：{len(edited_df)}</p>
+      <table style="border-collapse:collapse;font-size:14px">
+        <thead>
+          <tr style="background:#1a3f6f;color:white">
+            <th style="padding:6px 10px;border:1px solid #ddd">室外機型號</th>
+            <th style="padding:6px 10px;border:1px solid #ddd">類別</th>
+            <th style="padding:6px 10px;border:1px solid #ddd">證書編號</th>
+            <th style="padding:6px 10px;border:1px solid #ddd">有效期限</th>
+            <th style="padding:6px 10px;border:1px solid #ddd">剩餘天數</th>
+            <th style="padding:6px 10px;border:1px solid #ddd">決策狀態</th>
+          </tr>
+        </thead>
+        <tbody>{rows_html}
+        </tbody>
+      </table>
+      <p style="color:#888;font-size:12px;margin-top:16px">此為系統自動發送，請勿回覆。</p>
+    </body></html>"""
+    return html
+
+def send_mail(recipients, subject, html_body):
     gmail_user = st.secrets["GMAIL_ADDRESS"]
     gmail_pass = st.secrets["GMAIL_APP_PASSWORD"]
     msg = MIMEMultipart()
     msg["From"] = gmail_user
     msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
     with smtplib.SMTP("smtp.gmail.com", 587) as server:
         server.starttls()
         server.login(gmail_user, gmail_pass)
@@ -87,8 +157,12 @@ def send_mail(recipients, subject, body):
 # 標題
 # ─────────────────────────────────────────────
 st.markdown("##### 📊 商品生命週期與銷售數量儀表板")
-st.caption("串接「商品驗證登錄證書效期」與「節能標章銷售申報」，用室外機型號比對。"
-           "目前是用上傳的檔案做的原型，之後可以改成讀取 Google Sheets 即時資料。")
+if productdept_live:
+    st.caption(f"✅ 到期清單即時讀取自 ProductDept Google Sheets（{len(productdept_rows)} 筆，未去重）。銷售資料目前仍為上傳檔案做的原型資料。")
+else:
+    err = st.session_state.get("_productdept_error", "")
+    st.caption(f"⚠️ 尚未連上 ProductDept Google Sheets，暫時顯示本地備用資料。錯誤訊息：{err}")
+    st.caption("需要在 Streamlit Cloud 的 Secrets 加入 `gcp_service_account` 服務帳號設定，並確認該帳號有這份 Google Sheets 的檢視權限。")
 
 if "renewal_decisions" not in st.session_state:
     st.session_state["renewal_decisions"] = {}
@@ -163,7 +237,7 @@ if send_clicked:
     if not recipients:
         st.error("請輸入至少一個收件信箱")
     else:
-        body = build_email_body(edited_expiry, threshold_label)
+        body = build_email_html(edited_expiry, threshold_label)
         try:
             send_mail(recipients, f"【證書展延決策通知】{today.strftime('%Y/%m/%d')}", body)
             st.success(f"已寄出通知信給 {len(recipients)} 位收件人")
