@@ -37,10 +37,14 @@ def load_productdept_rows():
         # 實際欄位：A=實驗室、B=類別、C=室外機型號、D=測試搭配(室內機)、E=證書編號、F=有效期限
         # 畫面上的「Table_1」是 Google Sheets 表格功能的名稱標籤，不是資料列，
         # 所以第1列就是欄位標題，資料從第2列開始。
+        # 用 padding 而不是「欄位數不足就整列跳過」，避免 Google Sheets API 回傳的
+        # 某一列剛好比較短（尾端空白儲存格被省略）時，整筆資料被誤刪掉。
         for row in values[1:]:
-            if len(row) < 6 or not row[2].strip():
+            row = list(row) + [""] * (6 - len(row)) if len(row) < 6 else row
+            model = row[2].strip()
+            if not model:
                 continue
-            category, model, cert_no, expire_str = row[1].strip(), row[2].strip(), row[4].strip(), row[5].strip()
+            category, cert_no, expire_str = row[1].strip(), row[4].strip(), row[5].strip()
             if not expire_str:
                 continue
             try:
@@ -195,15 +199,13 @@ threshold_label = st.session_state["search_threshold_label"]
 
 expiry_view = cert_df[(cert_df["剩餘天數"] >= 0) & (cert_df["剩餘天數"] <= threshold_days)].copy()
 expiry_view = expiry_view.sort_values("剩餘天數")
-st.caption(f"目前顯示：{threshold_label}內到期（約 {threshold_days} 天），共 {len(expiry_view)} 筆")
+st.caption(f"目前顯示：{threshold_label}內到期（約 {threshold_days} 天），共 {len(expiry_view)} 筆"
+           "（室外機型號、證書編號皆不去重；同一張證書編號涵蓋多個型號時，展延勾選會連動）")
 
-# 用「室外機型號＋證書編號」當作每一列的唯一識別，避免同型號有多筆證書紀錄時
-# 互相覆蓋勾選狀態、或看起來像資料被去重掉了
-expiry_view["_row_key"] = expiry_view["室外機型號"].astype(str) + "｜" + expiry_view["證書編號"].astype(str)
-
+# 展延決策用「證書編號」分組：同一張證書底下的所有型號，勾選狀態一起連動
 decisions = st.session_state["renewal_decisions"]
-expiry_view["要展延"] = expiry_view["_row_key"].map(lambda k: decisions.get(k, {}).get("要展延", False))
-expiry_view["不展延"] = expiry_view["_row_key"].map(lambda k: decisions.get(k, {}).get("不展延", False))
+expiry_view["要展延"] = expiry_view["證書編號"].map(lambda k: decisions.get(k, {}).get("要展延", False))
+expiry_view["不展延"] = expiry_view["證書編號"].map(lambda k: decisions.get(k, {}).get("不展延", False))
 
 edited_expiry = st.data_editor(
     expiry_view[["室外機型號", "類別", "證書編號", "有效期限", "剩餘天數", "要展延", "不展延"]],
@@ -217,13 +219,28 @@ edited_expiry = st.data_editor(
     key="expiry_editor",
 )
 
-# 存回決策狀態時，一樣用「室外機型號＋證書編號」當 key
-edited_expiry["_row_key"] = edited_expiry["室外機型號"].astype(str) + "｜" + edited_expiry["證書編號"].astype(str)
+# 找出這次編輯中「哪一個證書編號的勾選狀態有變動」，把同證書編號的所有列都同步更新
+changed_certs = {}
 for _, row in edited_expiry.iterrows():
-    st.session_state["renewal_decisions"][row["_row_key"]] = {
-        "要展延": bool(row["要展延"]),
-        "不展延": bool(row["不展延"]),
-    }
+    cert = row["證書編號"]
+    prev = decisions.get(cert, {"要展延": False, "不展延": False})
+    now = {"要展延": bool(row["要展延"]), "不展延": bool(row["不展延"])}
+    if now != prev:
+        changed_certs[cert] = now
+
+for cert, val in changed_certs.items():
+    st.session_state["renewal_decisions"][cert] = val
+if changed_certs:
+    st.rerun()
+
+# 沒有變動的部分，把目前狀態存回去（確保新出現的證書編號也有預設值）
+for _, row in edited_expiry.iterrows():
+    cert = row["證書編號"]
+    if cert not in st.session_state["renewal_decisions"]:
+        st.session_state["renewal_decisions"][cert] = {
+            "要展延": bool(row["要展延"]),
+            "不展延": bool(row["不展延"]),
+        }
 
 st.divider()
 
