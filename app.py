@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import date, datetime
 
 st.set_page_config(page_title="商品生命週期與銷售儀表板", page_icon="📊", layout="wide")
@@ -23,139 +26,160 @@ cert_by_outdoor, sales_records = load_data()
 
 sales_df = pd.DataFrame(sales_records)
 sales_df["銷售量"] = pd.to_numeric(sales_df["銷售量"], errors="coerce").fillna(0)
+sales_df["期間"] = sales_df["年度"].astype(str) + "Q" + sales_df["季"].astype(str)
 
-# 依型號彙總銷售量（全部期間）
-agg = sales_df.groupby("室外機型號", dropna=True)["銷售量"].sum().reset_index()
-agg = agg.rename(columns={"銷售量": "總銷售量"})
+total_sales_by_model = sales_df.groupby("室外機型號")["銷售量"].sum().to_dict()
 
 today = date.today()
-rows = []
-for _, r in agg.iterrows():
-    model = r["室外機型號"]
-    if not model:
-        continue
-    cert = cert_by_outdoor.get(model)
-    if cert and cert.get("有效期限"):
+
+def build_cert_rows():
+    rows = []
+    for model, cert in cert_by_outdoor.items():
+        if not cert.get("有效期限"):
+            continue
         expire_date = datetime.strptime(cert["有效期限"], "%Y-%m-%d").date()
         days_left = (expire_date - today).days
-    else:
-        expire_date = None
-        days_left = None
-    rows.append({
-        "室外機型號": model,
-        "類別": cert.get("類別") if cert else "（無證書資料）",
-        "證書編號": cert.get("證書編號") if cert else None,
-        "有效期限": expire_date,
-        "剩餘天數": days_left,
-        "總銷售量": int(r["總銷售量"]),
-    })
+        rows.append({
+            "室外機型號": model,
+            "類別": cert.get("類別"),
+            "證書編號": cert.get("證書編號"),
+            "有效期限": expire_date,
+            "剩餘天數": days_left,
+            "總銷售量": int(total_sales_by_model.get(model, 0)),
+        })
+    return pd.DataFrame(rows)
 
-df = pd.DataFrame(rows)
+cert_df = build_cert_rows()
 
 # ─────────────────────────────────────────────
-# 標題與說明
+# 標題
 # ─────────────────────────────────────────────
 st.markdown("##### 📊 商品生命週期與銷售數量儀表板")
-st.caption("串接「商品驗證登錄證書效期」與「節能標章銷售申報」兩份資料，用室外機型號比對。"
-           "目前是用你上傳的檔案做的原型，之後可以改成讀取 Google Sheets 即時資料。")
+st.caption("串接「商品驗證登錄證書效期」與「節能標章銷售申報」，用室外機型號比對。"
+           "目前是用上傳的檔案做的原型，之後可以改成讀取 Google Sheets 即時資料。")
 
-has_cert = df["有效期限"].notna().sum()
-st.caption(f"共 {len(df)} 個有銷售紀錄的型號，其中 {has_cert} 個能對應到證書效期資料"
-           f"（{len(df) - has_cert} 個型號在證書資料裡找不到，可能是舊型號或尚未登錄）。")
-
-st.divider()
+if "renewal_decisions" not in st.session_state:
+    st.session_state["renewal_decisions"] = {}
 
 # ─────────────────────────────────────────────
-# 篩選控制項
+# 1. 到期清單（可調整門檻 + 展延決策 + 寄信）
 # ─────────────────────────────────────────────
-f1, f2, f3 = st.columns([1, 1, 2])
-with f1:
-    year_options = sorted(sales_df["年度"].unique())
-    selected_years = st.multiselect("年度", year_options, default=year_options)
-with f2:
-    quarter_options = sorted(sales_df["季"].unique())
-    selected_quarters = st.multiselect("季別", quarter_options, default=quarter_options)
-with f3:
-    expiry_filter = st.select_slider(
-        "只看效期在此範圍內的型號（可調整年/月門檻）",
-        options=["不限", "3個月內", "半年內", "1年內", "1年3個月內", "2年內"],
-        value="不限",
-    )
+with st.expander("📅 到期清單", expanded=True):
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        year_part = st.selectbox("年", list(range(0, 6)), index=1, key="expiry_year")
+    with c2:
+        month_part = st.selectbox("月", list(range(0, 12)), index=0, key="expiry_month")
 
-days_map = {"3個月內": 90, "半年內": 182, "1年內": 365, "1年3個月內": 456, "2年內": 730}
+    threshold_days = year_part * 365 + month_part * 30
 
-# 依篩選重新彙總銷售量
-filtered_sales = sales_df[
-    sales_df["年度"].isin(selected_years) & sales_df["季"].isin(selected_quarters)
-]
-filtered_agg = filtered_sales.groupby("室外機型號")["銷售量"].sum().reset_index()
-filtered_agg_map = dict(zip(filtered_agg["室外機型號"], filtered_agg["銷售量"]))
+    expiry_view = cert_df[(cert_df["剩餘天數"] >= 0) & (cert_df["剩餘天數"] <= threshold_days)].copy()
+    expiry_view = expiry_view.sort_values("剩餘天數")
+    threshold_label = "、".join(filter(None, [f"{year_part}年" if year_part else "", f"{month_part}個月" if month_part else ""])) or "0天"
+    st.caption(f"目前門檻：{threshold_label}內到期（約 {threshold_days} 天），共 {len(expiry_view)} 筆")
 
-df["篩選期間銷售量"] = df["室外機型號"].map(filtered_agg_map).fillna(0).astype(int)
+    # 帶入之前的展延決策（如果有），沒有的話預設兩欄都是 False
+    decisions = st.session_state["renewal_decisions"]
+    expiry_view["要展延"] = expiry_view["室外機型號"].map(lambda m: decisions.get(m, {}).get("要展延", False))
+    expiry_view["不展延"] = expiry_view["室外機型號"].map(lambda m: decisions.get(m, {}).get("不展延", False))
 
-view_df = df.copy()
-if expiry_filter != "不限":
-    max_days = days_map[expiry_filter]
-    view_df = view_df[view_df["剩餘天數"].notna() & (view_df["剩餘天數"] <= max_days) & (view_df["剩餘天數"] >= 0)]
-
-view_df = view_df.sort_values("篩選期間銷售量", ascending=False)
-
-# ─────────────────────────────────────────────
-# 摘要卡片
-# ─────────────────────────────────────────────
-m1, m2, m3 = st.columns(3)
-m1.metric("符合條件型號數", len(view_df))
-m2.metric("篩選期間總銷售量", f"{int(view_df['篩選期間銷售量'].sum()):,}")
-urgent_count = ((view_df["剩餘天數"].notna()) & (view_df["剩餘天數"] <= 180)).sum()
-m3.metric("半年內到期型號數", urgent_count)
-
-st.divider()
-
-# ─────────────────────────────────────────────
-# 泡泡圖：X=剩餘天數、Y=銷售量，快到期又賣得好的最值得優先處理
-# ─────────────────────────────────────────────
-st.markdown("**優先度泡泡圖**（左上角＝快到期又賣得好，最需要優先處理續證）")
-chart_df = view_df[view_df["剩餘天數"].notna()].copy()
-if not chart_df.empty:
-    st.scatter_chart(
-        chart_df,
-        x="剩餘天數",
-        y="篩選期間銷售量",
-        color="類別",
-        size="篩選期間銷售量",
+    edited_expiry = st.data_editor(
+        expiry_view[["室外機型號", "類別", "證書編號", "有效期限", "剩餘天數", "總銷售量", "要展延", "不展延"]],
         use_container_width=True,
+        hide_index=True,
+        disabled=["室外機型號", "類別", "證書編號", "有效期限", "剩餘天數", "總銷售量"],
+        column_config={
+            "要展延": st.column_config.CheckboxColumn("要展延"),
+            "不展延": st.column_config.CheckboxColumn("不展延"),
+        },
+        key="expiry_editor",
     )
-else:
-    st.info("目前篩選條件下沒有可繪圖的資料（可能都缺證書效期資料）。")
 
-st.divider()
+    # 存回決策狀態
+    for _, row in edited_expiry.iterrows():
+        st.session_state["renewal_decisions"][row["室外機型號"]] = {
+            "要展延": bool(row["要展延"]),
+            "不展延": bool(row["不展延"]),
+        }
+
+    st.divider()
+    st.markdown("**寄送展延決策通知**")
+    mail_col1, mail_col2 = st.columns([2, 1])
+    with mail_col1:
+        recipient_input = st.text_input("收件信箱（多個用逗號分隔）", placeholder="example1@company.com, example2@company.com")
+    with mail_col2:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        send_clicked = st.button("📨 寄送通知", use_container_width=True)
+
+    if send_clicked:
+        recipients = [r.strip() for r in recipient_input.split(",") if r.strip()]
+        if not recipients:
+            st.error("請輸入至少一個收件信箱")
+        else:
+            to_renew = edited_expiry[edited_expiry["要展延"]]
+            not_renew = edited_expiry[edited_expiry["不展延"]]
+            undecided = edited_expiry[~edited_expiry["要展延"] & ~edited_expiry["不展延"]]
+
+            lines = [f"【證書展延決策通知】{today.strftime('%Y/%m/%d')}", ""]
+            lines.append(f"門檻：{threshold_label}內到期　總筆數：{len(edited_expiry)}")
+            lines.append("")
+            lines.append(f"✅ 要展延（{len(to_renew)} 筆）：")
+            for _, r in to_renew.iterrows():
+                lines.append(f"  {r['室外機型號']}（{r['類別']}）　到期：{r['有效期限']}　剩餘 {r['剩餘天數']} 天")
+            lines.append("")
+            lines.append(f"❌ 不展延（{len(not_renew)} 筆）：")
+            for _, r in not_renew.iterrows():
+                lines.append(f"  {r['室外機型號']}（{r['類別']}）　到期：{r['有效期限']}")
+            lines.append("")
+            lines.append(f"⚠️ 尚未決定（{len(undecided)} 筆）：")
+            for _, r in undecided.iterrows():
+                lines.append(f"  {r['室外機型號']}（{r['類別']}）　到期：{r['有效期限']}")
+            lines.append("")
+            lines.append("此為系統自動發送，請勿回覆。")
+            body = "\n".join(lines)
+
+            try:
+                gmail_user = st.secrets["GMAIL_ADDRESS"]
+                gmail_pass = st.secrets["GMAIL_APP_PASSWORD"]
+                msg = MIMEMultipart()
+                msg["From"] = gmail_user
+                msg["To"] = ", ".join(recipients)
+                msg["Subject"] = f"【證書展延決策通知】{today.strftime('%Y/%m/%d')}"
+                msg.attach(MIMEText(body, "plain", "utf-8"))
+                with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                    server.starttls()
+                    server.login(gmail_user, gmail_pass)
+                    server.sendmail(gmail_user, recipients, msg.as_string())
+                st.success(f"已寄出通知信給 {len(recipients)} 位收件人")
+            except KeyError:
+                st.error("⚠️ 尚未設定寄信帳號，請在 Streamlit Cloud 的 Secrets 加入 GMAIL_ADDRESS 與 GMAIL_APP_PASSWORD")
+            except Exception as e:
+                st.error(f"寄信失敗：{e}")
 
 # ─────────────────────────────────────────────
-# 明細表
+# 2. 歷史銷量（類型／型號／年季銷量／總銷量）
 # ─────────────────────────────────────────────
-st.markdown("**明細清單**")
-display_df = view_df[["室外機型號", "類別", "證書編號", "有效期限", "剩餘天數", "篩選期間銷售量", "總銷售量"]]
-st.dataframe(display_df, use_container_width=True, hide_index=True)
+with st.expander("📈 歷史銷量", expanded=False):
+    pivot = sales_df.pivot_table(
+        index="室外機型號", columns="期間", values="銷售量", aggfunc="sum", fill_value=0
+    )
+    period_cols = sorted(pivot.columns)
+    pivot = pivot[period_cols]
+    pivot["總銷量"] = pivot.sum(axis=1)
+    pivot = pivot.reset_index()
+    pivot["類型"] = pivot["室外機型號"].map(lambda m: cert_by_outdoor.get(m, {}).get("類別", "（無證書資料）"))
 
-st.download_button(
-    "⬇ 下載這份清單（CSV）",
-    data=display_df.to_csv(index=False).encode("utf-8-sig"),
-    file_name="商品生命週期與銷售數量.csv",
-    mime="text/csv",
-)
+    cat_options = ["全部"] + sorted(pivot["類型"].dropna().unique().tolist())
+    picked_cat = st.selectbox("篩選類型", cat_options, key="sales_cat_filter")
+    view_pivot = pivot if picked_cat == "全部" else pivot[pivot["類型"] == picked_cat]
+    view_pivot = view_pivot.sort_values("總銷量", ascending=False)
 
-st.divider()
+    display_cols = ["類型", "室外機型號"] + period_cols + ["總銷量"]
+    st.dataframe(view_pivot[display_cols], use_container_width=True, hide_index=True)
 
-# ─────────────────────────────────────────────
-# 單一型號的季度銷售趨勢
-# ─────────────────────────────────────────────
-st.markdown("**單一型號的季度銷售趨勢**")
-model_options = view_df["室外機型號"].tolist()
-if model_options:
-    picked_model = st.selectbox("選擇型號", model_options)
-    trend = sales_df[sales_df["室外機型號"] == picked_model].copy()
-    trend["期間"] = trend["年度"].astype(str) + " Q" + trend["季"].astype(str)
-    trend = trend.groupby("期間")["銷售量"].sum().reset_index().sort_values("期間")
-    st.bar_chart(trend, x="期間", y="銷售量", use_container_width=True)
-else:
-    st.info("目前篩選條件下沒有型號可選。")
+    st.download_button(
+        "⬇ 下載歷史銷量（CSV）",
+        data=view_pivot[display_cols].to_csv(index=False).encode("utf-8-sig"),
+        file_name="歷史銷量.csv",
+        mime="text/csv",
+    )
