@@ -58,9 +58,9 @@ def load_productdept_rows():
                 "室外機型號": model, "類別": category,
                 "證書編號": cert_no, "有效期限": expire_date.isoformat(),
             })
-        return rows, True
+        return rows, True, None
     except Exception as e:
-        st.session_state["_productdept_error"] = str(e)
+        error_detail = f"{type(e).__name__}: {e}"
         # 讀不到就退回本地備用資料（一樣不去重）
         with open(os.path.join(HERE, "cert_data.json"), encoding="utf-8") as f:
             fallback = json.load(f)
@@ -68,14 +68,14 @@ def load_productdept_rows():
             {"室外機型號": m, "類別": c.get("類別"), "證書編號": c.get("證書編號"), "有效期限": c.get("有效期限")}
             for m, c in fallback.items() if c.get("有效期限")
         ]
-        return rows, False
+        return rows, False, error_detail
 
 @st.cache_data(show_spinner=False)
 def load_sales_data():
     with open(os.path.join(HERE, "sales_data.json"), encoding="utf-8") as f:
         return json.load(f)
 
-productdept_rows, productdept_live = load_productdept_rows()
+productdept_rows, productdept_live, productdept_error = load_productdept_rows()
 sales_records = load_sales_data()
 
 sales_df = pd.DataFrame(sales_records)
@@ -164,8 +164,8 @@ st.markdown("##### 📊 商品生命週期與銷售數量儀表板")
 if productdept_live:
     st.caption(f"✅ 到期清單即時讀取自 ProductDept Google Sheets（{len(productdept_rows)} 筆，未去重）。銷售資料目前仍為上傳檔案做的原型資料。")
 else:
-    err = st.session_state.get("_productdept_error", "")
-    st.caption(f"⚠️ 尚未連上 ProductDept Google Sheets，暫時顯示本地備用資料。錯誤訊息：{err}")
+    st.caption(f"⚠️ 尚未連上 ProductDept Google Sheets，暫時顯示本地備用資料。")
+    st.code(productdept_error or "（沒有取得詳細錯誤訊息）", language=None)
     st.caption("需要在 Streamlit Cloud 的 Secrets 加入 `gcp_service_account` 服務帳號設定，並確認該帳號有這份 Google Sheets 的檢視權限。")
 
 if "renewal_decisions" not in st.session_state:
