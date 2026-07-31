@@ -8,7 +8,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import date, datetime
 
-st.set_page_config(page_title="商品生命週期與銷售儀表板", page_icon="📊", layout="wide")
+st.set_page_config(page_title="商品生命週期儀錶板", page_icon="📊", layout="wide")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PRODUCTDEPT_SHEET_ID = "1hEt4uxBABBicxIMJuR57lMiigQYF02CQHZfB-Nc6vjo"  # Total Certificate Management
