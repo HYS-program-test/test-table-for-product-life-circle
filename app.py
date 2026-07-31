@@ -162,7 +162,7 @@ def send_mail(recipients, subject, html_body):
 # ─────────────────────────────────────────────
 # 標題
 # ─────────────────────────────────────────────
-st.markdown("##### 📊 商品生命週期與銷售數量儀表板")
+st.markdown("##### 📊 商品生命週期儀表板")
 if productdept_live:
     st.caption(f"✅ 到期清單即時讀取自 ProductDept Google Sheets（{len(productdept_rows)} 筆，未去重）。銷售資料目前仍為上傳檔案做的原型資料。")
 else:
