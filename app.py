@@ -296,17 +296,37 @@ def render():
     for _, row in edited_expiry.iterrows():
         cert = row["證書編號"]
         prev = decisions.get(cert, {"要展延": False, "不展延": False})
-        now = {"要展延": bool(row["要展延"]), "不展延": bool(row["不展延"])}
+        want_renew = bool(row["要展延"])
+        no_renew = bool(row["不展延"])
+
+        # 展延/不展延 互斥：兩個都勾的時候，以「剛剛被使用者改成 True 的那個」為準
+        if want_renew and no_renew:
+            if not prev["要展延"] and want_renew:
+                no_renew = False
+            elif not prev["不展延"] and no_renew:
+                want_renew = False
+            else:
+                no_renew = False  # 保底：兩個同時從 False 變 True 的極端情況，優先展延
+
+        now = {"要展延": want_renew, "不展延": no_renew}
         if now != prev:
             changed_certs[cert] = now
 
     if changed_certs:
         for cert, val in changed_certs.items():
             st.session_state["renewal_decisions"][cert] = val
-        try:
-            save_decisions_to_sheet(st.session_state["renewal_decisions"])
-        except Exception as e:
-            st.warning(f"勾選已更新在畫面上，但寫回 Google Sheets 失敗（portal 08頁可能看不到這次變動）：{e}")
+        # 畫面先立刻用最新的 session_state 重新整理，不用等 Google Sheets 寫入完成，
+        # 寫入放到背景執行緒去做，同系列勾選的視覺回饋才不會卡幾秒
+        import threading
+        decisions_snapshot = dict(st.session_state["renewal_decisions"])
+
+        def _bg_save(snapshot):
+            try:
+                save_decisions_to_sheet(snapshot)
+            except Exception:
+                pass  # 背景執行緒裡不能呼叫 st.* 顯示錯誤，安靜失敗，下次操作會再嘗試寫入
+
+        threading.Thread(target=_bg_save, args=(decisions_snapshot,), daemon=True).start()
         st.rerun()
 
     st.divider()
