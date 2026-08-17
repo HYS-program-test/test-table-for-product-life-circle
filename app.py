@@ -11,9 +11,10 @@ from email.mime.multipart import MIMEMultipart
 from datetime import date, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PRODUCTDEPT_SHEET_ID = "1hEt4uxBABBicxIMJuR57lMiigQYF02CQHZfB-Nc6vjo"  # Total Certificate Management
+PRODUCTDEPT_SHEET_ID = "1hEt4uxBABBicxIMJuR57lMiigQYF02CQHZfB-Nc6vjo"  # Total Certificate Management（原始商品證書資料，不動）
+OPS_SHEET_ID = "1DpsBjUnt45boxkN1LeZuELC0v2mqszn2PBB_TL1OqDQ"  # Library tool 08（展延流程操作用，跟 portal 的 08 頁共用）
 
-DECISIONS_TAB = "RenewalDecisions"   # 展延/不展延 勾選狀態，跟 portal 的 08 頁共用同一份，達成同步
+DECISIONS_TAB = "展延決策狀態"   # 展延/不展延 勾選狀態，跟 portal 的 08 頁共用同一份，達成同步
 
 
 # ─────────────────────────────────────────────
@@ -96,7 +97,7 @@ def load_decisions_from_sheet():
     """讀取展延/不展延勾選狀態，跟 portal 的 08 頁共用同一份分頁，達成跨部署同步。"""
     try:
         gc = _get_gspread_client(readonly=True)
-        sh = gc.open_by_key(PRODUCTDEPT_SHEET_ID)
+        sh = gc.open_by_key(OPS_SHEET_ID)
         ws = sh.worksheet(DECISIONS_TAB)
         values = ws.get_all_values()
         decisions = {}
@@ -115,7 +116,7 @@ def load_decisions_from_sheet():
 def save_decisions_to_sheet(decisions: dict):
     """把目前的勾選狀態整份寫回 Google Sheets（清空重寫）。"""
     gc = _get_gspread_client(readonly=False)
-    sh = gc.open_by_key(PRODUCTDEPT_SHEET_ID)
+    sh = gc.open_by_key(OPS_SHEET_ID)
     ws = _get_or_create_ws(sh, DECISIONS_TAB, rows=500, cols=3)
     ws.clear()
     header = ["證書編號", "要展延", "不展延"]
@@ -130,8 +131,8 @@ def save_decisions_to_sheet(decisions: dict):
 def _load_schedule_rows():
     try:
         gc = _get_gspread_client(readonly=True)
-        sh = gc.open_by_key(PRODUCTDEPT_SHEET_ID)
-        ws = sh.worksheet("MailSchedule")
+        sh = gc.open_by_key(OPS_SHEET_ID)
+        ws = sh.worksheet("定時寄信設定")
         values = ws.get_all_values()
         rows = []
         for row in values[1:]:
@@ -149,8 +150,8 @@ def _load_schedule_rows():
 
 def _save_schedule_rows(rows):
     gc = _get_gspread_client(readonly=False)
-    sh = gc.open_by_key(PRODUCTDEPT_SHEET_ID)
-    ws = _get_or_create_ws(sh, "MailSchedule", rows=20, cols=5)
+    sh = gc.open_by_key(OPS_SHEET_ID)
+    ws = _get_or_create_ws(sh, "定時寄信設定", rows=20, cols=5)
     ws.clear()
     header = ["月", "日", "年門檻", "月門檻", "收件信箱"]
     data = [header] + [[r["月"], r["日"], r["年門檻"], r["月門檻"], r["收件信箱"]] for r in rows]
@@ -333,7 +334,7 @@ def render():
 
     st.divider()
     st.markdown("**⏰ 定時寄信設定**")
-    st.caption("這裡設定的內容會寫進 Total Certificate Management 底下的 MailSchedule 分頁。")
+    st.caption("這裡設定的內容會寫進 Library tool 08 底下的「定時寄信設定」分頁。")
 
     if "schedule_rows" not in st.session_state:
         loaded = _load_schedule_rows()
@@ -359,7 +360,7 @@ def render():
     if st.button("💾 儲存排程設定"):
         try:
             _save_schedule_rows(st.session_state["schedule_rows"])
-            st.success("排程設定已寫入 Google Sheets 的 MailSchedule 分頁。")
+            st.success("排程設定已寫入 Google Sheets 的「定時寄信設定」分頁。")
         except Exception as e:
             st.error(f"儲存失敗：{e}")
 
