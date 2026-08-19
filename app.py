@@ -184,24 +184,13 @@ def render():
     cert_df = build_cert_rows()
 
     def build_email_html(edited_df, threshold_label):
-        def status_of(row):
-            if row["要展延"]:
-                return "✅ 要展延"
-            if row["不展延"]:
-                return "❌ 不展延"
-            return "⚠️ 尚未決定"
-
         rows_html = ""
         for _, r in edited_df.iterrows():
-            status = status_of(r)
             rows_html += f"""
             <tr>
-              <td style="padding:6px 10px;border:1px solid #ddd">{r['室外機型號']}</td>
-              <td style="padding:6px 10px;border:1px solid #ddd">{r['類別'] or ''}</td>
               <td style="padding:6px 10px;border:1px solid #ddd">{r['證書編號'] or ''}</td>
+              <td style="padding:6px 10px;border:1px solid #ddd">{r['室外機型號']}</td>
               <td style="padding:6px 10px;border:1px solid #ddd">{r['有效期限']}</td>
-              <td style="padding:6px 10px;border:1px solid #ddd;text-align:center">{r['剩餘天數']}</td>
-              <td style="padding:6px 10px;border:1px solid #ddd">{status}</td>
             </tr>"""
         return f"""
         <html><body style="font-family:'Microsoft JhengHei',Arial,sans-serif;color:#222">
@@ -209,12 +198,9 @@ def render():
           <p>門檻：{threshold_label}內到期　總筆數：{len(edited_df)}</p>
           <table style="border-collapse:collapse;font-size:14px">
             <thead><tr style="background:#1a3f6f;color:white">
+              <th style="padding:6px 10px;border:1px solid #ddd">商品驗證登錄證書編號</th>
               <th style="padding:6px 10px;border:1px solid #ddd">室外機型號</th>
-              <th style="padding:6px 10px;border:1px solid #ddd">類別</th>
-              <th style="padding:6px 10px;border:1px solid #ddd">證書編號</th>
-              <th style="padding:6px 10px;border:1px solid #ddd">有效期限</th>
-              <th style="padding:6px 10px;border:1px solid #ddd">剩餘天數</th>
-              <th style="padding:6px 10px;border:1px solid #ddd">決策狀態</th>
+              <th style="padding:6px 10px;border:1px solid #ddd">到期日期</th>
             </tr></thead>
             <tbody>{rows_html}</tbody>
           </table>
@@ -377,12 +363,44 @@ def render():
     )
     st.session_state["schedule_rows"] = edited_schedule.to_dict("records")
 
-    if st.button("💾 儲存排程設定"):
-        try:
-            _save_schedule_rows(st.session_state["schedule_rows"])
-            st.success("排程設定已寫入 Google Sheets 的「定時寄信設定」分頁。")
-        except Exception as e:
-            st.error(f"儲存失敗：{e}")
+    col_save, col_send_now = st.columns(2)
+    with col_save:
+        if st.button("💾 儲存排程設定", use_container_width=True):
+            try:
+                _save_schedule_rows(st.session_state["schedule_rows"])
+                st.success("排程設定已寫入 Google Sheets 的「定時寄信設定」分頁。")
+            except Exception as e:
+                st.error(f"儲存失敗：{e}")
+
+    with col_send_now:
+        if st.button("📨 現在寄送", use_container_width=True):
+            rows = st.session_state["schedule_rows"]
+            if not rows:
+                st.warning("目前沒有任何排程設定可以寄送。")
+            else:
+                sent_count = 0
+                for row in rows:
+                    recipients = [r.strip() for r in str(row.get("收件信箱", "")).split(",") if r.strip()]
+                    if not recipients:
+                        continue
+                    threshold_days = int(row["年門檻"]) * 365 + int(row["月門檻"]) * 30
+                    threshold_label = "、".join(filter(None, [
+                        f"{row['年門檻']}年" if row["年門檻"] else "",
+                        f"{row['月門檻']}個月" if row["月門檻"] else "",
+                    ])) or "0天"
+                    row_view = cert_df[(cert_df["剩餘天數"] >= 0) & (cert_df["剩餘天數"] <= threshold_days)].copy()
+                    row_view = row_view.sort_values("剩餘天數")
+                    body = build_email_html(row_view, threshold_label)
+                    try:
+                        send_mail(recipients, f"【證書展延決策通知】{today.strftime('%Y/%m/%d')}", body)
+                        sent_count += 1
+                    except KeyError:
+                        st.error("⚠️ 尚未設定寄信帳號，請在 Streamlit Cloud 的 Secrets 加入 GMAIL_ADDRESS 與 GMAIL_APP_PASSWORD")
+                        break
+                    except Exception as e:
+                        st.error(f"寄送給 {recipients} 失敗：{e}")
+                if sent_count:
+                    st.success(f"已依目前排程設定，馬上寄出 {sent_count} 封通知信。")
 
 
 if __name__ == "__main__":
